@@ -12,6 +12,10 @@ app = FastAPI(title="FRIDAY Python Agent Backend")
 
 VAULT_LOG_PATH = r"C:\Users\LP082W\.gemini\antigravity\scratch\friday-vault\memory\current-task.md"
 SCREENSHOT_DIR = r"C:\Users\LP082W\.gemini\antigravity\scratch\friday-vault\screenshots"
+import os as _os
+_os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+from fastapi.staticfiles import StaticFiles
+app.mount("/screenshots", StaticFiles(directory=SCREENSHOT_DIR), name="screenshots")
 USER_FACTS_PATH = r"C:\Users\LP082W\.gemini\antigravity\scratch\friday-vault\memory\user-facts.md"
 
 def load_user_facts() -> str:
@@ -240,7 +244,7 @@ $bitmap.Dispose()
             capture_output=True, text=True, timeout=15
         )
         if os.path.exists(save_path):
-            return f"[OK] Screenshot saved: {save_path}"
+            return f"[OK] Screenshot saved: {save_path}\n[IMG]/screenshots/{filename}"
         return f"[ERROR] Screenshot failed: {result.stderr}"
     except Exception as e:
         return f"[ERROR] Screenshot failed: {str(e)}"
@@ -1424,6 +1428,13 @@ async def chat_endpoint(req: ChatRequest):
         if not final_content:
             final_content = f"Tool '{last_tool_name}' executed. Output:\n{last_tool_output}" if last_tool_output else "[No response]"
 
+        # Inject any [IMG] tags from tool outputs into final_content
+        if "[IMG]" not in final_content and last_tool_output and "[IMG]" in last_tool_output:
+            import re as re_module
+            img_match = re_module.search(r'\[IMG\](\S+)', last_tool_output)
+            if img_match:
+                final_content += f"\n[IMG]{img_match.group(1)}"
+
         log_to_vault(user_message, model, final_content)
         return {"status": "success", "model": model, "response": final_content}
 
@@ -1685,6 +1696,7 @@ async def serve_dashboard():
 
         function formatMarkdown(text) {
             let html = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            html = html.replace(/\\[IMG\\](\\S+)/g, '<img src="$1" style="max-width:100%;border-radius:0.5rem;margin-top:0.5rem;display:block;" />');
             html = html.replace(/```(\\w*)\\n([\\s\\S]*?)```/g, (_, lang, code) => `<pre><code>${code.trim()}</code></pre>`);
             html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
             html = html.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');

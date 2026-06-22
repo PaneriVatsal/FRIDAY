@@ -1399,7 +1399,8 @@ async def chat_endpoint(req: ChatRequest):
                     if tool.get("name") == "open_app":
                         type_keywords = ["write", "type", "say", "enter", "input"]
                         if any(kw in user_message.lower() for kw in type_keywords):
-                            text_match = re.search(r'(?:write|type|say|enter|input)\s+["\']?([^"\']+)["\']?', user_message.lower())
+                            import re as re_module
+                            text_match = re_module.search(r'(?:write|type|say|enter|input)\s+["\']?([^"\']+)["\']?', user_message.lower())
                             if text_match:
                                 import time
                                 time.sleep(3)

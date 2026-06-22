@@ -62,11 +62,11 @@ def route_model(message: str) -> str:
         'add tool', 'add a tool', 'improve', 'self improve', 'new feature', 'add feature', 'add capability', 'can you add',
         'volume', 'mute', 'unmute', 'brightness', 'sound',
         'what can you', 'what features', 'capabilities', 'what tools', 'what do you',
-        'do it', 'type', 'click', 'press', 'write', 'keyboard', 'mouse'
+        'do it', 'type', 'click', 'press', 'write file', 'write to', 'keyboard', 'mouse'
     ]
     if any(kw in message.lower() for kw in keywords):
         return "qwen2.5-coder:latest"
-    return "llama3.1:latest"
+    return "gemma4:e4b"
 
 # ─── TOOLS ────────────────────────────────────────────────────────────────────
 
@@ -1221,7 +1221,7 @@ def summarize_old_memory():
         summary_text = ""
         try:
             payload = {
-                "model": "llama3.1:latest",
+                "model": "gemma4:e4b",
                 "messages": [
                     {"role": "system", "content": "You are a helpful assistant. Summarize the following conversation history briefly, focusing on the key tasks completed, user requests, and outcomes. Keep the summary concise and in bullet points."},
                     {"role": "user", "content": text_to_summarize}

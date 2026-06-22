@@ -1394,9 +1394,25 @@ async def chat_endpoint(req: ChatRequest):
                     last_tool_output = output
                     combined_outputs.append(f"Tool '{name}' output:\n{output}")
                 
+                # Auto-chain type_text after open_app if user message contains typing intent
+                for tool in manual_tools:
+                    if tool.get("name") == "open_app":
+                        type_keywords = ["write", "type", "say", "enter", "input"]
+                        if any(kw in user_message.lower() for kw in type_keywords):
+                            text_match = re.search(r'(?:write|type|say|enter|input)\s+["\']?([^"\']+)["\']?', user_message.lower())
+                            if text_match:
+                                import time
+                                time.sleep(3)
+                                text_to_type = text_match.group(1).strip()
+                                type_output = dispatch_tool("type_text", {"text": text_to_type})
+                                print(f"[Auto-chain type_text manual] {type_output}")
+                                last_tool_name = "type_text"
+                                last_tool_output = type_output
+                                combined_outputs.append(f"Tool 'type_text' output:\n{type_output}")
+
                 messages.append({
                     "role": "user",
-                    "content": "\n\n".join(combined_outputs) + "\n\nNow respond to the user in plain text."
+                    "content": "\n\n".join(combined_outputs) + "\n\nOriginal user request: " + user_message + "\n\nIf all steps are complete, respond in plain text. If more tools are needed, call the next tool now."
                 })
                 continue
 

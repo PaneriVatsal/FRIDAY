@@ -1,26 +1,62 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+@theme {
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+:root {
+  --background: 10 0 20;
+  --foreground: 255 255 255;
+  --violet-primary: 157 78 221;
+  --violet-glow: 157 78 221 / 0.5;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: rgb(var(--background));
+  color: rgb(var(--foreground));
+  font-family: var(--font-sans);
+  overflow: hidden;
+}
+
+.arc-reactor {
+  @apply relative w-64 h-64 rounded-full flex items-center justify-center;
+  background: radial-gradient(circle, rgb(var(--violet-primary)) 0%, transparent 70%);
+  box-shadow: 0 0 60px rgb(var(--violet-glow));
+}
+
+.core-inner {
+  @apply w-48 h-48 rounded-full border-4 border-violet-500/30 flex items-center justify-center relative;
+  background: rgba(157, 78, 221, 0.1);
+  backdrop-filter: blur(8px);
+}
+
+.core-pulse {
+  @apply absolute w-full h-full rounded-full;
+  border: 2px solid rgb(var(--violet-primary));
+  animation: core-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes core-pulse {
+  0% { transform: scale(1); opacity: 0.5; }
+  50% { transform: scale(1.2); opacity: 0; }
+  100% { transform: scale(1); opacity: 0.5; }
+}
+
+.wave-container {
+  @apply flex items-center gap-1 h-32;
+}
+
+.wave-bar {
+  @apply w-1 bg-violet-400 rounded-full;
+  animation: wave 1.2s ease-in-out infinite;
+}
+
+@keyframes wave {
+  0%, 100% { height: 10%; }
+  50% { height: 100%; }
+}
+
+.glass-card {
+  @apply bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6;
 }

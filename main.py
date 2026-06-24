@@ -1289,58 +1289,126 @@ def summarize_old_memory():
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest):
     user_message = req.message.strip()
-    capability_triggers = ['what can you do', 'what features', 'what tools', 'capabilities', 'what do you do', 'what can you']
-    if any(trigger in user_message.lower() for trigger in capability_triggers):
-        response = 'Here is what I can do:\n\n- run_command: Run any shell/PowerShell command\n- open_app: Open applications (chrome, notepad, spotify, etc.)\n- write_file / read_file: Read and write files\n- web_search: Search the web via DuckDuckGo\n- fetch_url: Read content from any URL\n- get_weather: Real-time weather for any city\n- take_screenshot: Capture your screen\n- get_battery_percentage: Check battery level\n- volume_control: Mute, unmute, louder, quieter, or set level\n- get_volume: Get current volume level\n- remember / recall: Save and retrieve personal facts\n- /improve [task]: Add new tools to myself'
-        log_to_vault(user_message, 'hardcoded', response)
-        return {'status': 'success', 'model': 'FRIDAY', 'response': response}
-
     if not user_message:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    summarize_old_memory()
+    capability_triggers = ['what can you do', 'what features', 'what tools', 'capabilities', 'what do you do', 'what can you']
+    if any(trigger in user_message.lower() for trigger in capability_triggers):
+        response = 'Here is what I can do:\n\n- run_command: Run any shell/PowerShell command\n- open_app: Open applications\n- write_file / read_file: Read and write files\n- web_search: Search the web\n- fetch_url: Read content from any URL\n- get_weather: Real-time weather\n- take_screenshot: Capture your screen\n- get_battery_percentage: Check battery level\n- volume_control / get_volume: Control volume\n- remember / recall: Save and retrieve personal facts\n- type_text, press_hotkey, click_mouse: Control keyboard and mouse\n- Obsidian: read, write, search notes'
+        log_to_vault(user_message, 'hardcoded', response)
+        return {'status': 'success', 'model': 'FRIDAY', 'response': response}
+
+    # Background summarization
+    import threading
+    threading.Thread(target=summarize_old_memory, daemon=True).start()
+
     memory = load_recent_memory(20)
+    user_facts = load_user_facts()
 
-    model = route_model(user_message)
-    print(f"Routing to model: {model}")
+    # Stage 1: Gemma Orchestrator
+    gemma_orchestrator_prompt = """You are FRIDAY, an intelligent AI assistant orchestrator.
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT_SHORT if model == "gemma4:e4b" else SYSTEM_PROMPT}
+Your job is to decide how to handle the user's message. You have three options:
+
+1. DIRECT: Answer directly if it is simple conversation, general knowledge, or opinion.
+2. CLARIFY: Ask for clarification if the request is ambiguous.
+3. DELEGATE: Delegate to the execution engine if tools are needed (file operations, web search, system control, weather, screenshots, apps, obsidian notes, battery, volume, mouse, keyboard).
+
+Output ONLY one of these three formats:
+
+For direct answer:
+Plain text response only. No JSON.
+
+For clarification:
+{"clarify": true, "question": "your question here"}
+
+For delegation:
+{"delegate": true, "task": "exact task description", "context": "relevant context from conversation"}
+
+RULES:
+- Never output both JSON and text together
+- If unsure whether tools are needed, delegate
+- Keep direct answers concise and intelligent
+""" + user_facts
+
+    gemma_messages = [
+        {"role": "system", "content": gemma_orchestrator_prompt}
     ]
     if memory:
-        messages.append({"role": "system", "content": f"=== RECENT CONVERSATION HISTORY ===\n{memory}"})
-    messages.append({"role": "user", "content": user_message})
-
-    max_turns = 5
-    final_content = ""
-    last_tool_name = None
-    last_tool_output = None
+        gemma_messages.append({"role": "system", "content": f"=== RECENT MEMORY ===\n{memory}"})
+    gemma_messages.append({"role": "user", "content": user_message})
 
     try:
+        gemma_payload = {
+            "model": "gemma4:e4b",
+            "messages": gemma_messages,
+            "stream": False,
+            "options": {"num_predict": -1}
+        }
+        gemma_res = requests.post("http://127.0.0.1:11434/api/chat", json=gemma_payload, timeout=60)
+        gemma_res.raise_for_status()
+        gemma_msg = gemma_res.json().get("message", {})
+        gemma_content = gemma_msg.get("content", "").strip()
+        print(f"[Gemma Orchestrator] Response: {gemma_content[:200]}")
+
+        # Parse Gemma decision
+        decision = None
+        try:
+            # Extract JSON if present
+            json_match = re.search(r'\{[\s\S]*\}', gemma_content)
+            if json_match:
+                decision = json.loads(json_match.group())
+        except Exception:
+            decision = None
+
+        # CLARIFY
+        if decision and decision.get("clarify"):
+            question = decision.get("question", "Could you clarify?")
+            log_to_vault(user_message, "gemma4:e4b", question)
+            return {"status": "success", "model": "gemma4:e4b", "response": question}
+
+        # DIRECT
+        if not decision or not decision.get("delegate"):
+            log_to_vault(user_message, "gemma4:e4b", gemma_content)
+            return {"status": "success", "model": "gemma4:e4b", "response": gemma_content}
+
+        # DELEGATE to Qwen
+        task = decision.get("task", user_message)
+        context = decision.get("context", "")
+        skills_info = load_skills()
+
+        qwen_system_prompt = """You are FRIDAY's execution engine. You receive a task and execute it using tools.
+Call tools as needed. You may chain up to 5 tool calls. Return results clearly.
+Never explain what you are going to do. Just do it.
+""" + skills_info
+
+        qwen_messages = [
+            {"role": "system", "content": qwen_system_prompt},
+            {"role": "user", "content": f"Task: {task}\nContext: {context}"}
+        ]
+
+        max_turns = 5
+        last_tool_output = None
+        last_tool_name = None
+
         for turn in range(max_turns):
-            payload = {
-                "model": model,
-                "messages": messages,
+            qwen_payload = {
+                "model": "qwen2.5-coder:latest",
+                "messages": qwen_messages,
                 "stream": False,
-                "think": False,
+                "tools": TOOLS_DEFINITION,
                 "options": {"num_predict": -1}
             }
-            if turn < max_turns - 1:
-                payload["tools"] = TOOLS_DEFINITION
-
-            res = requests.post("http://127.0.0.1:11434/api/chat", json=payload)
-            res.raise_for_status()
-            assistant_msg = res.json().get("message", {})
-            content = assistant_msg.get("content", "").strip()
-            if not content and assistant_msg.get("thinking"):
-                content = assistant_msg.get("thinking", "").strip()
-            tool_calls = assistant_msg.get("tool_calls", [])
-            print(f"[DEBUG] Tool calls received: {tool_calls}")
-            print(f"[DEBUG] Raw assistant message: {assistant_msg}")
+            qwen_res = requests.post("http://127.0.0.1:11434/api/chat", json=qwen_payload, timeout=60)
+            qwen_res.raise_for_status()
+            qwen_msg = qwen_res.json().get("message", {})
+            qwen_content = qwen_msg.get("content", "").strip()
+            tool_calls = qwen_msg.get("tool_calls", [])
+            print(f"[Qwen Executor] Turn {turn+1} tool_calls: {tool_calls}")
 
             # Try to parse manual JSON tool calls from text
             manual_tools = []
-            if not tool_calls and content:
+            if not tool_calls and qwen_content:
                 # Robust nested JSON extractor
                 json_blocks = []
                 brace_level = 0
@@ -1348,7 +1416,7 @@ async def chat_endpoint(req: ChatRequest):
                 in_string = False
                 escape_next = False
                 
-                for char in content:
+                for char in qwen_content:
                     if escape_next:
                         current_block += char
                         escape_next = False
@@ -1380,7 +1448,7 @@ async def chat_endpoint(req: ChatRequest):
                         pass
 
             if tool_calls:
-                messages.append(assistant_msg)
+                qwen_messages.append(qwen_msg)
                 for tc in tool_calls:
                     name = tc["function"]["name"]
                     args = tc["function"]["arguments"]
@@ -1389,28 +1457,10 @@ async def chat_endpoint(req: ChatRequest):
                     print(f"[Output] {output[:200]}")
                     last_tool_name = name
                     last_tool_output = output
-                    messages.append({"role": "tool", "content": output})
-                    
-                    # Auto-chain type_text after open_app if user message contains typing intent
-                    if name == "open_app":
-                        type_keywords = ["write", "type", "say", "enter", "input"]
-                        if any(kw in user_message.lower() for kw in type_keywords):
-                            import re
-                            # Extract quoted text or text after write/type/say
-                            text_match = re.search(r'(?:write|type|say|enter|input)\s+["\']?([^"\']+)["\']?', user_message.lower())
-                            if text_match:
-                                import time
-                                time.sleep(3)
-                                text_to_type = text_match.group(1).strip()
-                                type_output = dispatch_tool("type_text", {"text": text_to_type})
-                                print(f"[Auto-chain type_text] {type_output}")
-                                last_tool_name = "type_text"
-                                last_tool_output = type_output
-                                messages.append({"role": "tool", "content": type_output})
+                    qwen_messages.append({"role": "tool", "content": output})
                 continue
-
             elif manual_tools:
-                messages.append(assistant_msg)
+                qwen_messages.append(qwen_msg)
                 combined_outputs = []
                 for tool in manual_tools:
                     name = tool.get("name")
@@ -1422,51 +1472,55 @@ async def chat_endpoint(req: ChatRequest):
                     last_tool_output = output
                     combined_outputs.append(f"Tool '{name}' output:\n{output}")
                 
-                # Auto-chain type_text after open_app if user message contains typing intent
-                for tool in manual_tools:
-                    if tool.get("name") == "open_app":
-                        type_keywords = ["write", "type", "say", "enter", "input"]
-                        if any(kw in user_message.lower() for kw in type_keywords):
-                            import re as re_module
-                            text_match = re_module.search(r'(?:write|type|say|enter|input)\s+["\']?([^"\']+)["\']?', user_message.lower())
-                            if text_match:
-                                import time
-                                time.sleep(3)
-                                text_to_type = text_match.group(1).strip()
-                                type_output = dispatch_tool("type_text", {"text": text_to_type})
-                                print(f"[Auto-chain type_text manual] {type_output}")
-                                last_tool_name = "type_text"
-                                last_tool_output = type_output
-                                combined_outputs.append(f"Tool 'type_text' output:\n{type_output}")
-
-                messages.append({
+                qwen_messages.append({
                     "role": "user",
-                    "content": "\n\n".join(combined_outputs) + "\n\nOriginal user request: " + user_message + "\n\nIf all steps are complete, respond in plain text. If more tools are needed, call the next tool now."
+                    "content": "\n\n".join(combined_outputs) + "\n\nIf all steps are complete, respond in plain text. If more tools are needed, call the next tool now."
                 })
                 continue
-
             else:
-                final_content = content
+                # Qwen done
+                last_tool_output = qwen_content or last_tool_output
                 break
 
-        if not final_content:
-            final_content = f"Tool '{last_tool_name}' executed. Output:\n{last_tool_output}" if last_tool_output else "[No response]"
+        # Stage 3: Gemma Synthesizer
+        gemma_synthesizer_prompt = """You are FRIDAY, a Jarvis-style AI assistant.
+You are given the user's original request, the decision made, and the execution result.
+Synthesize a clear, concise, intelligent response for the user.
+Do not mention internal systems, tool names, or JSON. Just respond naturally.""" + user_facts
 
-        # Always use actual [IMG] path from tool output, ignore model hallucinations
+        synth_messages = [
+            {"role": "system", "content": gemma_synthesizer_prompt},
+            {"role": "user", "content": f"""User asked: {user_message}
+
+Execution result:
+{last_tool_output}
+
+Respond naturally to the user."""}
+        ]
+
+        synth_payload = {
+            "model": "gemma4:e4b",
+            "messages": synth_messages,
+            "stream": False,
+            "options": {"num_predict": -1}
+        }
+        synth_res = requests.post("http://127.0.0.1:11434/api/chat", json=synth_payload, timeout=60)
+        synth_res.raise_for_status()
+        final_response = synth_res.json().get("message", {}).get("content", "").strip()
+
+        # Fix screenshot IMG path
         if last_tool_output and "[IMG]" in last_tool_output:
-            import re as re_module
-            img_match = re_module.search(r'\[IMG\](\S+)', last_tool_output)
+            img_match = re.search(r'\[IMG\](\S+)', last_tool_output)
             if img_match:
                 actual_img = img_match.group(1)
-                # Strip any hallucinated [IMG] from final_content and inject real one
-                final_content = re_module.sub(r'\[IMG\]\S+', '', final_content).strip()
-                final_content += f"\n[IMG]{actual_img}"
+                final_response = re.sub(r'\[IMG\]\S+', '', final_response).strip()
+                final_response += f"\n[IMG]{actual_img}"
 
-        log_to_vault(user_message, model, final_content)
-        return {"status": "success", "model": model, "response": final_content}
+        log_to_vault(user_message, "gemma4:e4b+qwen", final_response)
+        return {"status": "success", "model": "gemma4:e4b+qwen", "response": final_response}
 
     except requests.exceptions.ConnectionError:
-        raise HTTPException(status_code=503, detail="Cannot connect to Ollama at http://127.0.0.1:11434")
+        raise HTTPException(status_code=503, detail="Cannot connect to Ollama")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Runtime error: {str(e)}")
 

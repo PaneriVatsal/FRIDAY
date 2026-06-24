@@ -796,6 +796,44 @@ def get_mouse_position() -> str:
     x, y = pyautogui.position()
     return f"Mouse position: ({x}, {y})"
 
+NOTES_DIR = r"C:\Users\LP082W\.gemini\antigravity\scratch\friday-vault\notes"
+
+def obsidian_write_note(title: str, content: str) -> str:
+    import os
+    os.makedirs(NOTES_DIR, exist_ok=True)
+    path = os.path.join(NOTES_DIR, f"{title}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"[OK] Note saved: {path}"
+
+def obsidian_read_note(title: str) -> str:
+    path = os.path.join(NOTES_DIR, f"{title}.md")
+    if not os.path.exists(path):
+        return f"[ERROR] Note not found: {title}"
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+def obsidian_search_notes(query: str) -> str:
+    import os
+    if not os.path.exists(NOTES_DIR):
+        return "[No notes found]"
+    results = []
+    for fname in os.listdir(NOTES_DIR):
+        if fname.endswith(".md"):
+            fpath = os.path.join(NOTES_DIR, fname)
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read()
+            if query.lower() in content.lower() or query.lower() in fname.lower():
+                results.append(f"- {fname}: {content[:200]}")
+    return "\n".join(results) if results else f"[No notes matching: {query}]"
+
+def obsidian_list_notes() -> str:
+    import os
+    if not os.path.exists(NOTES_DIR):
+        return "[No notes directory found]"
+    files = [f for f in os.listdir(NOTES_DIR) if f.endswith(".md")]
+    return "\n".join(files) if files else "[No notes found]"
+
 # ─── TOOL DISPATCHER ───
 
 def dispatch_tool(name: str, arguments: dict) -> str:
@@ -885,6 +923,14 @@ def dispatch_tool(name: str, arguments: dict) -> str:
         )
     elif name == "get_mouse_position":
         return get_mouse_position()
+    elif name == "obsidian_write_note":
+        return obsidian_write_note(arguments.get("title", ""), arguments.get("content", ""))
+    elif name == "obsidian_read_note":
+        return obsidian_read_note(arguments.get("title", ""))
+    elif name == "obsidian_search_notes":
+        return obsidian_search_notes(arguments.get("query", ""))
+    elif name == "obsidian_list_notes":
+        return obsidian_list_notes()
     return f"[ERROR] Unknown tool: {name}"
 
 # ─── TOOL DEFINITIONS ─────────────────────────────────────────────────────────
@@ -1124,6 +1170,57 @@ TOOLS_DEFINITION = [
                 "properties": {},
                 "required": []
             }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "obsidian_write_note",
+            "description": "Create or overwrite a markdown note in the vault.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Note title (filename without .md)"},
+                    "content": {"type": "string", "description": "Markdown content of the note"}
+                },
+                "required": ["title", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "obsidian_read_note",
+            "description": "Read a note from the vault by title.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Note title (filename without .md)"}
+                },
+                "required": ["title"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "obsidian_search_notes",
+            "description": "Search notes in the vault by keyword.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search keyword"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "obsidian_list_notes",
+            "description": "List all notes in the vault.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
         }
     }
 ]

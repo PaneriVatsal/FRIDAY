@@ -420,6 +420,14 @@ def recall() -> str:
     except Exception as e:
         return f"[ERROR] Could not recall facts: {str(e)}"
 
+def _test_syntax(code: str, result_queue):
+    import ast
+    try:
+        ast.parse(code)
+        result_queue.put("ok")
+    except SyntaxError as e:
+        result_queue.put(f"syntax_error:{e}")
+
 class ImproveRequest(BaseModel):
     task: str
 
@@ -428,255 +436,187 @@ async def improve_endpoint(req: ImproveRequest):
     task = req.task.strip()
     if not task:
         raise HTTPException(status_code=400, detail="Task cannot be empty")
-        
+
     try:
         import datetime
         import glob
+        import multiprocessing
+        import ast
+
+        # 1. Classify risk level
+        risk_keywords_high = ['orchestrator', 'chat_endpoint', 'improve_endpoint', 'dispatch_tool', 'summarize', 'vault', 'memory']
+        risk_keywords_medium = ['existing', 'modify', 'update', 'change', 'edit', 'replace', 'routing', 'system_prompt']
         
-        # 1. Backups directory management
+        task_lower = task.lower()
+        if any(kw in task_lower for kw in risk_keywords_high):
+            risk = "high"
+        elif any(kw in task_lower for kw in risk_keywords_medium):
+            risk = "medium"
+        else:
+            risk = "low"
+        
+        print(f"[Improve] Risk level: {risk} for task: {task}")
+
+        if risk == "high":
+            return {"status": "blocked", "response": f"Task classified as HIGH RISK. This would modify core systems. Manual edit required.\nTask: {task}"}
+
+        # 2. Backup
         backup_dir = r"C:\Users\LP082W\.gemini\antigravity\scratch\friday-vault\backups"
         os.makedirs(backup_dir, exist_ok=True)
-        
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_filename = f"main_backup_{timestamp}.py"
         backup_path = os.path.join(backup_dir, backup_filename)
-        
-        # Read current main.py
         current_path = r"C:\Users\LP082W\.gemini\antigravity\scratch\friday\main.py"
+
         with open(current_path, "r", encoding="utf-8") as f:
             current_code = f.read()
-            
-        # Write backup
         with open(backup_path, "w", encoding="utf-8") as f:
             f.write(current_code)
-            
-        # Keep only the last 5 backups
-        backup_files = sorted(
-            glob.glob(os.path.join(backup_dir, "main_backup_*.py")),
-            key=os.path.getmtime
-        )
+
+        backup_files = sorted(glob.glob(os.path.join(backup_dir, "main_backup_*.py")), key=os.path.getmtime)
         if len(backup_files) > 5:
-            for old_backup in backup_files[:-5]:
-                try:
-                    os.remove(old_backup)
-                except Exception as e:
-                    print(f"Failed to delete old backup {old_backup}: {e}")
-                    
-        # 2. Read the skills vault for relevant info
+            for old in backup_files[:-5]:
+                try: os.remove(old)
+                except: pass
+
+        # 3. Generate function code
         skills_info = load_skills()
-        
-        # 3. Call Ollama for ONLY the new tool function code
         system_msg_func = (
-            "You are a master python programmer. Your task is to write ONLY the Python function code (using `def ...`) that implements the requested capability.\n"
-            "CRITICAL: Never mix single and double quotes inside f-strings. Use only single quotes for the outer string and avoid double quotes inside f-strings entirely. Use subprocess.run with a list of arguments instead of a shell string.\n"
-            "CRITICAL: The function must be valid Python only. Any shell commands must be wrapped in subprocess.run(). Do not include example usage calls at the bottom. Import any needed modules inside the function.\n"
-            "CRITICAL: Do NOT write the entire file. Do NOT write any introduction or explanation text. Only output the code inside a raw python code block (using ```python ... ```)."
+            "You are a master python programmer. Write ONLY the Python function code (using def ...) that implements the requested capability.\n"
+            "CRITICAL: Never mix single and double quotes inside f-strings. Import needed modules inside the function.\n"
+            "CRITICAL: Do NOT write the entire file. Output only code inside a ```python ... ``` block."
         )
-        user_prompt_func = (
-            f"Please write the Python function code for the following feature/task:\n\n"
-            f"Task: {task}\n\n"
-            f"Refer to the skills vault if needed:\n{skills_info}"
-        )
-        
         payload_func = {
             "model": "qwen2.5-coder:latest",
             "messages": [
                 {"role": "system", "content": system_msg_func},
-                {"role": "user", "content": user_prompt_func}
+                {"role": "user", "content": f"Task: {task}\n\nSkills:\n{skills_info}"}
             ],
-            "stream": False
+            "stream": False,
+            "options": {"num_predict": -1}
         }
-        
-        print(f"[Improve Endpoint] Querying Qwen for Python function implementation...")
         res_func = requests.post("http://127.0.0.1:11434/api/chat", json=payload_func, timeout=300)
         res_func.raise_for_status()
-        
         assistant_content_func = res_func.json().get("message", {}).get("content", "")
-        print(f"[Improve Endpoint] Function LLM response (first 500 chars):\n{assistant_content_func[:500]}")
-        
-        code_match = re.search(r'```python\s*([\s\S]*?)```', assistant_content_func)
-        if not code_match:
-            code_match = re.search(r'```\s*([\s\S]*?)```', assistant_content_func)
-            
-        if not code_match:
-            if "def " in assistant_content_func:
-                start_idx = assistant_content_func.find("def ")
-                function_code = assistant_content_func[start_idx:].strip()
-            else:
-                raise Exception("LLM response did not contain a valid python function block starting with def.")
-        else:
+
+        code_match = re.search(r'```python\s*([\s\S]*?)```', assistant_content_func) or re.search(r'```\s*([\s\S]*?)```', assistant_content_func)
+        if code_match:
             function_code = code_match.group(1).strip()
-            
-        # Strip markdown code fences
+        elif "def " in assistant_content_func:
+            function_code = assistant_content_func[assistant_content_func.find("def "):].strip()
+        else:
+            raise Exception("No valid function found in LLM response.")
+
         function_code = function_code.replace("```python", "").replace("```", "").strip()
-        
-        # Post-processing: Remove example usage calls or comments
+
         name_match = re.search(r'def\s+([a-zA-Z0-9_]+)', function_code)
         extracted_tool_name = name_match.group(1) if name_match else ""
-        cleaned_lines = []
-        for line in function_code.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("# Example") or stripped.startswith("# example"):
-                continue
-            if extracted_tool_name and re.match(rf'^{extracted_tool_name}\(', stripped):
-                continue
-            cleaned_lines.append(line)
+        cleaned_lines = [l for l in function_code.splitlines() if not l.strip().startswith("# Example") and not (extracted_tool_name and re.match(rf'^{extracted_tool_name}\(', l.strip()))]
         function_code = "\n".join(cleaned_lines).strip()
-        
-        # Repair f-string nested quote issues (e.g. f"some {dict["key"]}" -> f"some {dict['key']}")
-        repaired_lines = []
-        for line in function_code.splitlines():
-            if 'f"' in line and '{' in line and '"' in line:
-                parts = re.split(r'(\{[^\}]*\})', line)
-                for i in range(1, len(parts), 2):
-                    parts[i] = parts[i].replace('"', "'")
-                line = "".join(parts)
-            repaired_lines.append(line)
-        function_code = "\n".join(repaired_lines).strip()
-        
-        # Check for unescaped triple quotes
-        if function_code.count('"""') % 2 != 0:
-            raise Exception("Extracted function contains unescaped triple double-quotes.")
-        if function_code.count("'''") % 2 != 0:
-            raise Exception("Extracted function contains unescaped triple single-quotes.")
-            
-        # Print function code to terminal
-        print(f"[Improve Endpoint] Cleaned function code:\n{function_code}")
-        
-        print(f"[Improve Endpoint] Generated function length: {len(function_code)} characters")
+
         if len(function_code) < 50:
             raise Exception("Generated function code is too short.")
-            
-        # 4. Call Ollama for the JSON TOOLS_DEFINITION entry
+
+        # 4. Timeout test using multiprocessing
+        result_queue = multiprocessing.Queue()
+        p = multiprocessing.Process(target=_test_syntax, args=(function_code, result_queue))
+        p.start()
+        p.join(timeout=10)
+        if p.is_alive():
+            p.terminate()
+            raise Exception("Function code timed out during syntax check.")
+        result = result_queue.get() if not result_queue.empty() else "unknown"
+        if result != "ok":
+            raise Exception(f"Syntax error in generated code: {result}")
+
+        # 5. Generate JSON tool definition
         system_msg_json = (
-            "You are a master programmer. Your task is to write ONLY the JSON/dict entry representing this new function's parameters and description, matching the format of TOOLS_DEFINITION.\n"
-            "Format details: it must have key keys 'type': 'function' and 'function': {'name': '...', 'description': '...', 'parameters': {...}}.\n"
-            "CRITICAL: Do NOT write any introduction or explanation text. Only output raw JSON inside a ```json ... ``` or ``` ... ``` block."
+            "Write ONLY the JSON entry for TOOLS_DEFINITION matching format: {'type':'function','function':{'name':'...','description':'...','parameters':{...}}}.\n"
+            "Output raw JSON inside a ```json ... ``` block only."
         )
-        user_prompt_json = (
-            f"Write the TOOLS_DEFINITION JSON entry for this function/feature:\n\n"
-            f"Task: {task}\n\n"
-            f"The generated python function is:\n{function_code}"
-        )
-        
         payload_json = {
             "model": "qwen2.5-coder:latest",
             "messages": [
                 {"role": "system", "content": system_msg_json},
-                {"role": "user", "content": user_prompt_json}
+                {"role": "user", "content": f"Task: {task}\n\nFunction:\n{function_code}"}
             ],
-            "stream": False
+            "stream": False,
+            "options": {"num_predict": -1}
         }
-        
-        print(f"[Improve Endpoint] Querying Qwen for JSON tool definition...")
         res_json = requests.post("http://127.0.0.1:11434/api/chat", json=payload_json, timeout=300)
         res_json.raise_for_status()
-        
         assistant_content_json = res_json.json().get("message", {}).get("content", "")
-        print(f"[Improve Endpoint] JSON LLM response (first 500 chars):\n{assistant_content_json[:500]}")
-        
-        json_match = re.search(r'```json\s*([\s\S]*?)```', assistant_content_json)
-        if not json_match:
-            json_match = re.search(r'```\s*([\s\S]*?)```', assistant_content_json)
-            
-        if not json_match:
-            if "{" in assistant_content_json:
-                start_idx = assistant_content_json.find("{")
-                end_idx = assistant_content_json.rfind("}") + 1
-                json_entry_str = assistant_content_json[start_idx:end_idx].strip()
-            else:
-                raise Exception("LLM response did not contain a valid JSON object.")
-        else:
+
+        json_match = re.search(r'```json\s*([\s\S]*?)```', assistant_content_json) or re.search(r'```\s*([\s\S]*?)```', assistant_content_json)
+        if json_match:
             json_entry_str = json_match.group(1).strip()
-            
-        # Parse tool name
+        elif "{" in assistant_content_json:
+            json_entry_str = assistant_content_json[assistant_content_json.find("{"):assistant_content_json.rfind("}")+1].strip()
+        else:
+            raise Exception("No valid JSON found in LLM response.")
+
         try:
             def_data = json.loads(json_entry_str)
             tool_name = def_data["function"]["name"]
         except Exception:
-            name_match = re.search(r'def\s+([a-zA-Z0-9_]+)', function_code)
-            if name_match:
-                tool_name = name_match.group(1)
-            else:
-                raise Exception("Could not determine tool name from either function code or JSON definition.")
-                
-        # 5. Incremental Injection logic using markers
+            tool_name = extracted_tool_name
+            if not tool_name:
+                raise Exception("Could not determine tool name.")
+
+        # 6. Inject into main.py
         TOOL_DISPATCHER_MARKER = "# " + "─── TOOL DISPATCHER ───"
         modified_code = current_code.replace(TOOL_DISPATCHER_MARKER, function_code + '\n\n' + TOOL_DISPATCHER_MARKER, 1)
-        
-        # Marker B: Dispatch case inside dispatch_tool before return f"[ERROR] Unknown tool: {name}"
+
         marker_error = "    " + 'return f"[ERROR] Unknown tool: {name}"'
         if marker_error not in modified_code:
-            raise Exception("Marker for unknown tool error not found in main.py")
+            raise Exception("Dispatcher marker not found.")
         dispatch_case = f"    elif name == \"{tool_name}\":\n        return {tool_name}(**{{k: arguments.get(k) for k in arguments}})\n"
         modified_code = modified_code.replace(marker_error, f"{dispatch_case}{marker_error}", 1)
-        
-        # Marker C: Tool definition inside TOOLS_DEFINITION before the closing ]
+
         marker_tools_end = "]\n\n" + 'SYSTEM_PROMPT = """You are FRIDAY'
         if marker_tools_end not in modified_code:
             marker_tools_end = "]\r\n\r\n" + 'SYSTEM_PROMPT = """You are FRIDAY'
         if marker_tools_end not in modified_code:
-            raise Exception("Could not find the end of TOOLS_DEFINITION list marker.")
-            
-        # Cleanly format json_entry_str
+            raise Exception("TOOLS_DEFINITION end marker not found.")
+
         try:
             parsed_json = json.loads(json_entry_str)
             formatted_json = json.dumps(parsed_json, indent=8)
             lines = formatted_json.splitlines()
-            indented_lines = [lines[0]] + ["    " + line for line in lines[1:]]
-            formatted_json = "\n".join(indented_lines)
+            formatted_json = "\n".join([lines[0]] + ["    " + l for l in lines[1:]])
         except Exception:
             formatted_json = json_entry_str
-            
-        replacement_text = f",\n    {formatted_json}\n" + marker_tools_end
-        modified_code = modified_code.replace(marker_tools_end, replacement_text, 1)
-        
-        # Write modified code to main.py
-        with open(current_path, "w", encoding="utf-8") as f:
-            f.write(modified_code)
-            
-        # Print lines around the dispatcher to help with syntax error debugging
-        try:
-            mod_lines = modified_code.splitlines()
-            disp_idx = -1
-            for idx, line in enumerate(mod_lines):
-                if TOOL_DISPATCHER_MARKER in line:
-                    disp_idx = idx
-                    break
-            if disp_idx != -1:
-                start_print = max(0, disp_idx - 15)
-                end_print = min(len(mod_lines), disp_idx + 15)
-                print(f"[Improve Endpoint] Surrounding modified code (lines {start_print} to {end_print}):")
-                for idx in range(start_print, end_print):
-                    print(f"{idx + 1}: {mod_lines[idx]}")
-        except Exception as pe:
-            print(f"[Improve Endpoint] Failed to print surrounding code: {pe}")
-            
-        # 6. Compile check
-        import ast
+
+        modified_code = modified_code.replace(marker_tools_end, f",\n    {formatted_json}\n" + marker_tools_end, 1)
+
+        # 7. Final AST check before writing
         try:
             ast.parse(modified_code)
         except SyntaxError as e:
-            with open(current_path, "w", encoding="utf-8") as f:
-                f.write(current_code)
-            raise Exception(f"Syntax error in generated code: {e}")
-            
-        # 7. Save note to improvements.md
+            raise Exception(f"Syntax error in modified file: {e}")
+
+        with open(current_path, "w", encoding="utf-8") as f:
+            f.write(modified_code)
+
+        # 8. Log
         improvements_path = r"C:\Users\LP082W\.gemini\antigravity\scratch\friday-vault\memory\improvements.md"
         os.makedirs(os.path.dirname(improvements_path), exist_ok=True)
-        log_entry = (
-            f"### Direct Endpoint Improvement ({timestamp})\n"
-            f"- **Task**: {task}\n"
-            f"- **Status**: Success\n"
-            f"- **Backup Created**: {backup_filename}\n\n"
-        )
         with open(improvements_path, "a", encoding="utf-8") as f:
-            f.write(log_entry)
-            
-        return {"status": "success", "response": f"Successfully implemented task '{task}'. Compilation passed. Backup saved to {backup_filename}."}
-        
+            f.write(f"### {timestamp}\n- Task: {task}\n- Risk: {risk}\n- Status: Success\n- Backup: {backup_filename}\n\n")
+
+        return {"status": "success", "response": f"[{risk.upper()} RISK] Successfully implemented: '{task}'. Backup: {backup_filename}."}
+
     except Exception as e:
-        return {"status": "failure", "response": f"Failed to improve: {str(e)}"}
+        # Rollback
+        try:
+            with open(backup_path, "r", encoding="utf-8") as f:
+                original = f.read()
+            with open(current_path, "w", encoding="utf-8") as f:
+                f.write(original)
+            print(f"[Improve] Rolled back to {backup_filename}")
+        except Exception as rollback_err:
+            print(f"[Improve] Rollback failed: {rollback_err}")
+        return {"status": "failure", "response": f"Failed: {str(e)}. Rolled back to {backup_filename}."}
 
 
 import subprocess
@@ -834,6 +774,24 @@ def obsidian_list_notes() -> str:
     files = [f for f in os.listdir(NOTES_DIR) if f.endswith(".md")]
     return "\n".join(files) if files else "[No notes found]"
 
+def get_system_uptime():
+    import subprocess
+    from datetime import datetime
+    try:
+        res = subprocess.run(
+            ["powershell", "-Command", "(gcim Win32_OperatingSystem).LastBootUpTime.ToString('o')"],
+            capture_output=True, text=True, timeout=10
+        )
+        boot_time_str = res.stdout.strip()
+        boot_time = datetime.fromisoformat(boot_time_str[:26])
+        uptime = datetime.now() - boot_time
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes = remainder // 60
+        return f"System uptime: {days} days, {hours} hours, {minutes} minutes"
+    except Exception as e:
+        return f"[ERROR] Could not get uptime: {str(e)}"
+
 # ─── TOOL DISPATCHER ───
 
 def dispatch_tool(name: str, arguments: dict) -> str:
@@ -931,6 +889,8 @@ def dispatch_tool(name: str, arguments: dict) -> str:
         return obsidian_search_notes(arguments.get("query", ""))
     elif name == "obsidian_list_notes":
         return obsidian_list_notes()
+    elif name == "get_system_uptime":
+        return get_system_uptime(**{k: arguments.get(k) for k in arguments})
     return f"[ERROR] Unknown tool: {name}"
 
 # ─── TOOL DEFINITIONS ─────────────────────────────────────────────────────────
@@ -1222,6 +1182,15 @@ TOOLS_DEFINITION = [
             "description": "List all notes in the vault.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
+    }
+,
+    {
+            "type": "function",
+            "function": {
+                    "name": "get_system_uptime",
+                    "description": "This tool returns the current system uptime by querying the last boot time using PowerShell.",
+                    "parameters": {}
+            }
     }
 ]
 

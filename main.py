@@ -218,17 +218,34 @@ def web_search(query: str) -> str:
         
     return f"[No results found for: {query}]"
 
-def take_screenshot(filename: str = "") -> str:
-    """Take a screenshot and save it to the vault screenshots folder."""
+def take_screenshot(filename: str = "", focus_window: str = "") -> str:
+    import datetime
+    import time
     try:
-        import datetime
         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
         if not filename:
             filename = f"screenshot_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         if not filename.endswith(".png"):
             filename += ".png"
         save_path = os.path.join(SCREENSHOT_DIR, filename)
-        # Use PowerShell to take screenshot (no extra deps needed)
+
+        # Focus the target window if specified
+        if focus_window:
+            focus_script = f"""
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {{
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+}}
+'@
+$proc = Get-Process | Where-Object {{ $_.MainWindowTitle -like '*{focus_window}*' -or $_.ProcessName -like '*{focus_window}*' }} | Select-Object -First 1
+if ($proc) {{ [Win32]::SetForegroundWindow($proc.MainWindowHandle) }}
+"""
+            subprocess.run(["powershell", "-Command", focus_script], capture_output=True, timeout=10)
+            time.sleep(1.5)
+
         ps_script = f"""
 Add-Type -AssemblyName System.Windows.Forms
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -840,7 +857,7 @@ def dispatch_tool(name: str, arguments: dict) -> str:
             return combined_output
         return search_results
     elif name == "take_screenshot":
-        return take_screenshot(arguments.get("filename", ""))
+        return take_screenshot(arguments.get("filename", ""), arguments.get("focus_window", ""))
     elif name == "fetch_url":
         return fetch_url(arguments.get("url", ""))
     elif name == "get_weather":
@@ -953,7 +970,8 @@ TOOLS_DEFINITION = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "Optional filename for the screenshot (without path). Auto-generated if not provided."}
+                    "filename": {"type": "string", "description": "Optional filename for the screenshot (without path). Auto-generated if not provided."},
+                    "focus_window": {"type": "string", "description": "Optional app or window name to focus before taking screenshot (e.g. 'chrome', 'obsidian', 'notepad')."}
                 },
                 "required": []
             }
@@ -1153,6 +1171,8 @@ RULES:
 - When the user tells you something personal (their name, preferences, location, job, etc.) ALWAYS call remember() to save it. When answering personal questions, call recall() first. Never search the web for personal information the user has told you.
 """ + load_skills() + load_user_facts()
 
+SYSTEM_PROMPT_SHORT = """You are FRIDAY, a Jarvis-style AI assistant. Be concise, direct, and intelligent. Answer questions thoughtfully. The user's name may be in the facts below.""" + load_user_facts()
+
 # ─── VAULT LOGGING ────────────────────────────────────────────────────────────
 
 REFUSAL_PHRASES = [
@@ -1285,7 +1305,7 @@ async def chat_endpoint(req: ChatRequest):
     print(f"Routing to model: {model}")
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT}
+        {"role": "system", "content": SYSTEM_PROMPT_SHORT if model == "gemma4:e4b" else SYSTEM_PROMPT}
     ]
     if memory:
         messages.append({"role": "system", "content": f"=== RECENT CONVERSATION HISTORY ===\n{memory}"})
@@ -1301,7 +1321,9 @@ async def chat_endpoint(req: ChatRequest):
             payload = {
                 "model": model,
                 "messages": messages,
-                "stream": False
+                "stream": False,
+                "think": False,
+                "options": {"num_predict": -1}
             }
             if turn < max_turns - 1:
                 payload["tools"] = TOOLS_DEFINITION
@@ -1310,6 +1332,8 @@ async def chat_endpoint(req: ChatRequest):
             res.raise_for_status()
             assistant_msg = res.json().get("message", {})
             content = assistant_msg.get("content", "").strip()
+            if not content and assistant_msg.get("thinking"):
+                content = assistant_msg.get("thinking", "").strip()
             tool_calls = assistant_msg.get("tool_calls", [])
             print(f"[DEBUG] Tool calls received: {tool_calls}")
             print(f"[DEBUG] Raw assistant message: {assistant_msg}")
@@ -1428,12 +1452,15 @@ async def chat_endpoint(req: ChatRequest):
         if not final_content:
             final_content = f"Tool '{last_tool_name}' executed. Output:\n{last_tool_output}" if last_tool_output else "[No response]"
 
-        # Inject any [IMG] tags from tool outputs into final_content
-        if "[IMG]" not in final_content and last_tool_output and "[IMG]" in last_tool_output:
+        # Always use actual [IMG] path from tool output, ignore model hallucinations
+        if last_tool_output and "[IMG]" in last_tool_output:
             import re as re_module
             img_match = re_module.search(r'\[IMG\](\S+)', last_tool_output)
             if img_match:
-                final_content += f"\n[IMG]{img_match.group(1)}"
+                actual_img = img_match.group(1)
+                # Strip any hallucinated [IMG] from final_content and inject real one
+                final_content = re_module.sub(r'\[IMG\]\S+', '', final_content).strip()
+                final_content += f"\n[IMG]{actual_img}"
 
         log_to_vault(user_message, model, final_content)
         return {"status": "success", "model": model, "response": final_content}

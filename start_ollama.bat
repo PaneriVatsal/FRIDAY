@@ -1,0 +1,6 @@
+@echo on
+set OLLAMA_NUM_PARALLEL=4
+set OLLAMA_MAX_LOADED_MODELS=2
+set OLLAMA_HOST=127.0.0.1:11434
+set | findstr OLLAMA_
+ollama serve

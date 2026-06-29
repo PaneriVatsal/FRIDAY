@@ -1,0 +1,12 @@
+{
+  "current_goal": "it is to short make it long edit it",
+  "current_plan": [
+    "respond directly to user with a request for the short text they want expanded or edited"
+  ],
+  "observations": [
+    "Please provide the short text you'd like me to expand or edit."
+  ],
+  "open_loops": [],
+  "pending_questions": [],
+  "temporary_notes": []
+}

@@ -1,0 +1,1 @@
+# FRIDAY - Local AI Agent

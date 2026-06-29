@@ -1,0 +1,23 @@
+{
+  "candidates": [
+    {
+      "statement": "For tasks involving 'Acknowledge the greeting and offer assistance.', tools [run_command] are effective.",
+      "confidence": 0.6,
+      "times_reinforced": 1,
+      "last_updated": "2026-06-29T15:18:36.043572"
+    },
+    {
+      "statement": "For tasks involving 'Open the Notepad application.', tools [open_app] are effective.",
+      "confidence": 0.6,
+      "times_reinforced": 1,
+      "last_updated": "2026-06-29T15:27:29.518371"
+    },
+    {
+      "statement": "For tasks involving 'Open Notepad, create a new file, and write a song ', tools [open_app, type_text] are effective.",
+      "confidence": 0.6,
+      "times_reinforced": 1,
+      "last_updated": "2026-06-29T15:32:01.098838"
+    }
+  ],
+  "promoted": []
+}

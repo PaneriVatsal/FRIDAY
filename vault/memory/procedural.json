@@ -1,0 +1,63 @@
+[
+  {
+    "name": "web_search_then_fetch",
+    "description": "Search the web for information, then fetch the most relevant URL for detailed content.",
+    "steps": [
+      "web_search with query",
+      "fetch_url on best result",
+      "return combined info"
+    ],
+    "success_rate": 0.91,
+    "confidence": 0.9,
+    "cost": "medium",
+    "when_to_use": "current events, news, real-time information, facts, prices, weather",
+    "avoid_when": "user asks a simple conversational question or opinion",
+    "failure_modes": [
+      "no search results",
+      "URL fetch timeout",
+      "irrelevant results"
+    ],
+    "last_used": "",
+    "times_used": 0
+  },
+  {
+    "name": "direct_answer",
+    "description": "Answer the user directly without any tool calls.",
+    "steps": [
+      "understand the question",
+      "respond with knowledge"
+    ],
+    "success_rate": 0.98,
+    "confidence": 0.95,
+    "cost": "low",
+    "when_to_use": "simple questions, conversation, greetings, opinions, general knowledge",
+    "avoid_when": "user needs real-time data, file operations, or system control",
+    "failure_modes": [
+      "outdated knowledge",
+      "missing context"
+    ],
+    "last_used": "",
+    "times_used": 0
+  },
+  {
+    "name": "open_then_type",
+    "description": "Open an application and type text into it.",
+    "steps": [
+      "open_app with app name",
+      "wait for app to open",
+      "type_text with content"
+    ],
+    "success_rate": 0.85,
+    "confidence": 0.8,
+    "cost": "medium",
+    "when_to_use": "user asks to write in an app, type something, open and enter text",
+    "avoid_when": "user just wants to open an app without typing",
+    "failure_modes": [
+      "app not found",
+      "typing too fast",
+      "wrong window focused"
+    ],
+    "last_used": "",
+    "times_used": 0
+  }
+]
